@@ -27,12 +27,12 @@ int main(int argc, char* argv[])
     int socketfd;
     struct addrinfo hints,*server_add;
     memset(&hints,0,sizeof(hints));
-    hints.ai_family = AF_INET6;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     //hints.ai_flags = AI_PASSIVE; // fill my ip address for me
 
     int status = 0;
-    if((status = getaddrinfo("::1","3490",&hints,&server_add)) != 0)
+    if((status = getaddrinfo("192.168.50.111","13017",&hints,&server_add)) != 0)
     {
         std::cout << "gai error :" << gai_strerror(status);
     }
@@ -54,7 +54,16 @@ int main(int argc, char* argv[])
     int err = WSAGetLastError();
     std::cerr << "Connect failed. Error: " << err << "\n";
     
-    char msg[] = "Hello server\n";
+    char msg[] = "Science\n";
     send(socketfd,msg,strlen(msg),0);
     std::cout << "data sent\n";
+    char response[10000];
+    std::string quiz = "";
+    while(recv(socketfd,response,sizeof(response),0) > 0);
+    
+        quiz += response;
+        std::cout << quiz;
+    
+    
+    //std::cout << response;
 }
