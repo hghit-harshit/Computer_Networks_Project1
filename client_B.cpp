@@ -40,7 +40,7 @@ void display_menu()
 std::string select_genre()
 {
     int choice;
-    std::vector<std::string>genres = {"Biology","Physics","Chemistry","Mathematics"};
+    std::vector<std::string>genres = {"Biology","Physics","Chemistry"};
     std::cout << "Please selce your prefered genre for quiz\n";
     std::cout << "=========================================\n";
     std::cout << "1.Biology\n";
@@ -61,7 +61,9 @@ std::string select_genre()
         }
         return genres[choice-1];
     }
+    //else return genres[1];
     else return genres[rand()%genres.size()];
+
 }
 
 
@@ -72,7 +74,7 @@ void receiver_thread(int socketfd) {
         int bytes_received = recv(socketfd, buffer, sizeof(buffer)-1, 0);
         if (bytes_received <= 0) 
         {
-            std::cerr << "Server disconnected.\n";
+            std::cerr << "Server disconnected or error.\n";
             running = false;
             break;
         }
@@ -117,6 +119,8 @@ void print_leaderboard(const std::string& raw_json)
     }
 }
 
+
+
 inline void get_leaderboard(int socketfd)
 {
     send(socketfd, "L", 1, 0);
@@ -155,7 +159,7 @@ int main(int argc, char* argv[])
             return 1;
         }
     #endif
-    
+
     if (argc > 1 && std::string(argv[1]) == "auto")  
     {
         automatic = true;
@@ -191,7 +195,6 @@ int main(int argc, char* argv[])
     std::thread(receiver_thread,socketfd).detach();
 
     std::string name,genre;
-    std::cout << "Please enter you name: ";
     if(!automatic)
         std::cin >> name;
     else name = "Player" + std::to_string(rand()%1000) ;
@@ -213,13 +216,20 @@ int main(int argc, char* argv[])
     lock.unlock();
     
     nlohmann::json response_json = nlohmann::json::parse(quiz_msg);
-
+    if(response_json["was_cached"] == "yes")
+    {
+        std::cout << "These question were cached in the server.\n";
+    }
+    else 
+    {
+        std::cout << "These question are fresh from the LLM.\n";
+    }
     for(const  auto& question : response_json["questions"])
     {
-        std::cout << question["q"].get<std::string>() << std::endl;
+        std::cout << question["q"] << std::endl;
         for(const auto& option : question["options"])
         {
-            std::cout << option.get<std::string>() << std::endl;
+            std::cout << option << std::endl;
         }
 
         std::cout << "Enter your choice(A,B,C,D):";
@@ -231,7 +241,6 @@ int main(int argc, char* argv[])
         if(send(socketfd,answer.c_str(),answer.size(),0) == -1)
         {
             std::cerr << "Could not send answer\n";
-            perror("send");
         }
       
         std::unique_lock<std::mutex> resp_lock(queue_mutex);
@@ -245,7 +254,7 @@ int main(int argc, char* argv[])
         while(true)
         {
             std::cout <<"=======================\n";
-            std::cout << "What do you want to do?\n";
+            std::cout << "What do you want to do\n";
             std::cout << "Next question(type N)\n";
             std::cout << "See Leaderboard(type L)\n";
             std::cout <<"=======================\n";
@@ -258,6 +267,7 @@ int main(int argc, char* argv[])
             }
             else if(answer == "L")
             {
+                //handle_leaderboard(socketfd,answer);
                 get_leaderboard(socketfd);
             }
             else
@@ -270,6 +280,5 @@ int main(int argc, char* argv[])
     std::cout << "You have completed the Quiz!!\n";
     std::cout << "Your score is " << "score" << " out of 10\n";
     get_leaderboard(socketfd);
-
     
 }
