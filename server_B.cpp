@@ -26,6 +26,8 @@
 #include <queue>
 #include <fstream> // to read input from a file incase your llm fails
 
+std::mutex question_cache_mutex;
+std::map<std::string,std::pair<nlohmann::json,std::string>> question_cache;
 std::mutex leaderboard_mutex;
 std::map<std::string,int> leaderboard;
 std::mutex client_mutex;
@@ -152,7 +154,7 @@ inline std::string get_questions(const std::string& http_body)
  * @param questions 
  * @return std::pair<std::string,std::string> 
  */
-std::pair<std::string,std::string> parse_questions(const std::string& questions)
+std::pair<nlohmann::json,std::string> parse_questions(const std::string& questions)
 {
     
     nlohmann::json quiz = nlohmann::json::parse(questions);
@@ -172,14 +174,14 @@ std::pair<std::string,std::string> parse_questions(const std::string& questions)
         //     std::cout << "  " << opt << "\n";
         // }
         
-        // std::cout << "Answer: " << question["a"] << "\n\n";
+        //std::cout << "Answer: " << question["a"] << "\n\n";
         answers += question["a"];
     }
-
-    return {filtered_quiz.dump(),answers};
+    filtered_quiz["was_cached"] = "no";
+    return {filtered_quiz,answers};
 }
 
-std::pair<std::string,std::string> saved_questions(std::string& genre)
+std::pair<nlohmann::json,std::string> saved_questions(std::string& genre)
 {
     std::fstream file("science_questions.txt");
     if(!file.is_open())
@@ -199,7 +201,7 @@ std::pair<std::string,std::string> saved_questions(std::string& genre)
     
 }
 
-std::pair<std::string,std::string> generate_quiz(std::string& genre,int socket_lllm)
+std::pair<nlohmann::json,std::string> generate_quiz(std::string& genre,int socket_lllm)
 {
     int socket_llm = connect_to_llm();
     std::string json = R"({
@@ -260,6 +262,25 @@ std::pair<std::string,std::string> generate_quiz(std::string& genre,int socket_l
     
 }
 
+void enable_keepalive(int socket) 
+{
+    int yes = 1;
+    if (setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) < 0) {
+        perror("setsockopt(SO_KEEPALIVE) failed");
+    }
+
+    // Optional: fine-tune parameters (Linux only)
+    int idle = 10;     // seconds before sending keepalive probes
+    int interval = 5;  // seconds between keepalive probes
+    int count = 3;     // number of failed probes before declaring dead
+
+    if (setsockopt(socket, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) < 0)
+        perror("setsockopt(TCP_KEEPIDLE) failed");
+    if (setsockopt(socket, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval)) < 0)
+        perror("setsockopt(TCP_KEEPINTVL) failed");
+    if (setsockopt(socket, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count)) < 0)
+        perror("setsockopt(TCP_KEEPCNT) failed");
+}
 
 std::string get_leaderboard()
 {
@@ -276,35 +297,66 @@ std::string get_leaderboard()
     return json.dump();
 }
 
-
+bool check_cache(const std::string& genre)
+{
+    std::lock_guard<std::mutex> lock(question_cache_mutex);
+    return (question_cache.find(genre) != question_cache.end());
+}
 
 void handle_client(int client_socket,int socket_llm)
 {
     
     char client_msg[1024];
-    if(recv(client_socket,client_msg,sizeof(client_msg),0)<= 0)
+    bool was_cache = false;
+    recv(client_socket,client_msg,sizeof(client_msg),0);
+    nlohmann::json client_msg_json; 
+    try{  client_msg_json = nlohmann::json::parse((std::string)client_msg);}
+    catch(...)
     {
-        std::cerr << "Client Dissconnectd before giving quiz\n";
+        std::cerr << "Invalid json received\n";
+        std::cerr << client_msg << std::endl;
+        return;
     }
-
-    nlohmann::json client_msg_json = nlohmann::json::parse((std::string)client_msg);
 
     //std::cout << "client_msg:\n" << client_msg << std::endl;
     std::string client_name = client_msg_json["name"];
     std::string genre = client_msg_json["genre"];
     std::cout << "name: " << client_name << std::endl;
     std::cout << "genre: " << genre << std::endl;
+
     {
         std::lock_guard<std::mutex> lock(leaderboard_mutex);
         leaderboard[client_name] = 0;
     }
-    reserve_llm(0);
-    auto [quiz,answers] = generate_quiz(genre,socket_llm);
+    
+    std::string quiz_string,answers;
+    if(check_cache(genre))
+    {
+        std::cout << "Genre found in cache sending cached data.\n";
 
-    const char* buffer = quiz.c_str();
-    size_t total_data = quiz.size();
+        {
+            std::lock_guard<std::mutex> lock(question_cache_mutex);
+            auto[quiz_json,ans] = question_cache[genre];
+        
+            quiz_json["was_cached"] = "yes";
+            quiz_string = quiz_json.dump();
+            answers = ans;
+        }
+    }   
+    else
+    {
+        reserve_llm(0);
+        auto [quiz_json,ans] = generate_quiz(genre,socket_llm);
+        quiz_string = quiz_json.dump();
+        answers = ans;
+        std::lock_guard<std::mutex> lock(question_cache_mutex);
+        question_cache[genre] = {quiz_json,ans};
+    }
+
+    const char* buffer = quiz_string.c_str();
+    size_t total_data = quiz_string.size();
     size_t data_sent = 0;
-    //std::cout <<"THE QUIZ\n" <<quiz;
+    //std::cout <<"THE QUIZ\n" <<quiz_string;
     while(data_sent < total_data)
     {
         int n = send(client_socket,buffer+data_sent,total_data - data_sent,0);
@@ -349,7 +401,7 @@ void handle_client(int client_socket,int socket_llm)
                 return;
             }
             std::string msg(client_resp,bytes_received);
-            std::cout << client_resp << std::endl;
+            //std::cout << client_resp << std::endl;
             if(msg == "OK")
             {
                 std::cout << "Received OK from client:" << client_name << std::endl;
@@ -396,7 +448,6 @@ void handle_client(int client_socket,int socket_llm)
             std::cout << "Sent KEEP_ALIVE\n";
             last_keepalive = now;
         }
-        
     }
     std::cout << client_name <<" has completed the quiz.\n";
     server_resp = get_leaderboard();
@@ -471,7 +522,7 @@ int main(int argc, char* argv[])
             exit(1);
         }
         else{ std::cout << "New client connected.\n";}
-        //enable_keepalive(new_client);
+        enable_keepalive(new_client);
         std::thread(handle_client,new_client,socket_llm).detach();
     }
     
